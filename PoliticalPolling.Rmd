@@ -1,0 +1,220 @@
+---
+title: "PoliticalPolling"
+author: "2Lt., Mark G. Sheppard, M.A., M.P.P., Ph.D. (2025)"
+---
+
+```{r, include=FALSE}
+# Load necessary libraries
+rm(list = ls())
+library(readr)
+library(tidyverse)
+library(lubridate)
+library(fredr)
+library(tidyr)
+library(dplyr)
+fredr_set_key("6352ad3b393d3ab83709630e61d2b14e")
+cat("\014")
+```
+
+```{r}
+library(png)
+library(grid)
+library(magick)
+library(cowplot)
+```
+
+```{r, include=FALSE}
+# CREATE POLLING ERROR 
+# Source: https://fivethirtyeight.com/features/2022-election-polling-accuracy/
+polling_error <- data.frame(
+  Cycle = c("2000", "2004","2008", "2012", "2016", "2020"),
+  President = c(-2.4, 1.2, 0.9, -2.5, 3.3, 4.1))
+
+# Create weights of the same length as the data
+weights <- c(1, 2, 3, 4, 5, 6)
+
+# Normalize the weights so they sum to 1
+weights <- weights / sum(weights)
+
+# Calculate the weighted average
+weighted_avg <- weighted.mean(polling_error$President, weights)
+
+# Good polls, tipping states, with error
+#Source Calibrating Israel/Gaza https://www.nytimes.com/2023/11/30/briefing/polling-gaza.html
+df <- read_csv("https://projects.fivethirtyeight.com/polls/data/president_polls.csv") %>%
+  mutate(end_date = mdy(end_date)) %>%  # Convert end_date to Date format
+  filter(candidate_name %in% c("Donald Trump", "Kamala Harris")) %>%  # Filter for Trump and Harris
+  filter(end_date >= as.Date("2024-07-21")) %>%  # Filter for dates after July 21, 2024
+  filter(numeric_grade > 2.5) %>%  # Filter for numeric_grade > 2.5 (good polls only)
+  select(time = end_date, candidate = candidate_name, value = pct, state = state) %>%
+  group_by(time, candidate, state) %>%
+  summarise(value = mean(value, na.rm = TRUE), .groups = 'drop') %>%  # Calculate mean value and drop grouping
+  mutate(Incumbency = ifelse(candidate == "Kamala Harris", 1, 0),  # Create Incumbency variable
+         polling_with_incumbency = ifelse(Incumbency == 1, value + 2.6/2, value)) %>%  # Half incumbency bonus for VP
+
+  # Retrieve the Misery Index data (Unemployment and CPI) with CPI as YoY percent change
+  left_join(
+    merge(
+      # Get the Unemployment Rate (UNRATE) without percent change
+      fredr(series_id = "UNRATE", observation_start = as.Date("2000-01-01"))[, c("date", "value")] %>%
+        rename(value_unrate = value),  # Rename for clarity
+
+      # Get the CPI with year-over-year percent change
+      fredr(series_id = "CPIAUCSL", observation_start = as.Date("2000-01-01"))[, c("date", "value")] %>%
+        mutate(value_cpi_yoy = (value - lag(value, 12)) / lag(value, 12) * 100) %>%  # YoY percent change for CPI
+        select(date, value_cpi_yoy),  # Select date and YoY percent change for CPI
+      by = "date", suffixes = c("_unrate", "_cpi")
+    ) %>%
+    # Create Misery Index by summing the unemployment rate and YoY CPI change
+    transform(misery = value_unrate + value_cpi_yoy) %>%
+    subset(select = c(date, misery)),  # Select only date and misery index
+    by = c("time" = "date")
+  ) %>%
+  fill(misery, .direction = "down") %>%  # Fill missing misery values with the previous value
+  fill(misery, .direction = "up") %>%  # Ensure even earlier NA values get filled
+  mutate(
+    # Adjust for misery index only if Incumbency is 1 and misery is greater than 5
+    polling_incumbency_misery = ifelse(Incumbency == 1 & misery > 5, polling_with_incumbency - 2.5/2, polling_with_incumbency),
+    
+    # Adjust for Gaza situation (simply subtract 1 if Incumbency is 1)
+    polling_incumbency_misery_gaza = ifelse(Incumbency == 1, polling_incumbency_misery - 1*.11, polling_incumbency_misery),
+    
+    # Calculate weighted average and apply adjustment for Kamala Harris
+    polling_incumbency_misery_gaza_and_error = ifelse(
+      candidate == "Kamala Harris",
+      polling_incumbency_misery_gaza - weighted_avg,
+      polling_incumbency_misery_gaza
+    )
+  ); rm(list = setdiff(ls(), "df")); cat("\014")
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Define the tipping points list
+tipping_points <- c("Pennsylvania", "North Carolina", "Michigan", "Wisconsin", "Georgia", 
+            "Arizona", "Nevada", "Texas", "New Mexico", "Florida", "Minnesota")
+
+# Find the date range for Pennsylvania
+pennsylvania_dates <- df %>% filter(state == "Pennsylvania") %>% summarize(min_date = min(time), max_date = max(time))
+
+# THIS MAKES THE GRAPH WITH UPDATED STYLING, FIXED OPACITY, AND A SIMPLIFIED LEGEND
+graph <- ggplot(df %>% filter(state %in% tipping_points), 
+       aes(x = time, y = polling_incumbency_misery_gaza_and_error, 
+           color = candidate, 
+           group = interaction(candidate, state))) +  
+  
+  # Plot the standard error shading
+geom_smooth(aes(linetype = state, fill = candidate),
+            method = "loess",
+            size = 0,
+            span = 0.4,
+            se = TRUE,
+            level = 0.9,   # Higher confidence interval
+            alpha = 0.04,   # Very transparent
+            show.legend = FALSE) +
+
+  # Now plot the actual lines for each state
+  geom_smooth(data = df %>% filter(state == "Pennsylvania"), aes(linetype = state),  
+              method = "loess", size = 0.6, span = 0.35, se = FALSE, alpha = 1, show.legend = FALSE) + 
+  geom_smooth(data = df %>% filter(state == "Michigan"), aes(linetype = state),  
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "Wisconsin"), aes(linetype = state),  
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "Arizona"), aes(linetype = state),  
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "North Carolina"), aes(linetype = state),  
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "Nevada"), aes(linetype = state),  
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "Georgia"), aes(linetype = state),  
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "Texas"), aes(linetype = state),   
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "New Mexico"), aes(linetype = state),   
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "Florida"), aes(linetype = state),   
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+  geom_smooth(data = df %>% filter(state == "Minnesota"), aes(linetype = state),   
+              method = "loess", size = 0.3, span = 0.4, se = FALSE, alpha = 0.4, show.legend = FALSE) +  
+
+  # Set consistent colors and fills for the candidates
+  scale_color_manual(values = c("Donald Trump" = "#eb4823", "Kamala Harris" = "#50a1c5"),  
+                     labels = c("Donald Trump", "Kamala Harris")) +  
+  scale_fill_manual(values = c("Donald Trump" = "#eb4823", "Kamala Harris" = "#50a1c5")) +  
+
+  # Customize the legend and position
+  guides(color = guide_legend(override.aes = list(fill = NA, alpha = 1),  
+                              title = NULL, nrow = 1, keywidth = .5, keylength = 2)) +  
+  theme(legend.position = "top", legend.justification = "center") +  
+
+  # Labels and titles
+  labs(title = "The 2024 Election",
+       subtitle = "Polling of Tipping Point States with Fundamentals, Incumbency and Error\nPolling data with Maximum Ranking from July 21, 2024 to Present, \nEstimates include partial Incumbency Bonus and Misery Index Adjustments\nData from Tipping Point States",
+       x = NULL,  
+       y = "POLLING DATA, IN PERCENTAGE",  
+       caption = "\nSource: Polling data from a variety of sources. Only including polls with a >2.5 ranking from FiveThirtyEight\nNote: Adjusted for incumbency (D+1.3), misery index(D-1.25), and external factors, including the foreign conflict discontent (D-0.11).\nAdditionally a moving average of polling, weighted by recency (D-1.6) was introduced.\nAuthor: Mark G. Sheppard") +  
+
+  # Minimal theme adjustments
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(face = "bold", color = "#454545", size = 14),  
+    plot.subtitle = element_text(color = "darkgrey", size = 7),  
+    axis.text.x = element_text(face = "bold", size = 7, angle = 90, hjust = 1),  
+    axis.title.y = element_text(color = "darkgrey", face = "bold", size = 6, margin = margin(r = 5, l = 5)),  
+    legend.position = c(0.9, 1.1),  
+    legend.justification = "right",  
+    panel.grid.major.x = element_blank(),  
+    panel.grid.minor.x = element_blank(),  
+    panel.grid.major.y = element_line(linetype = "dotted", size = 0.1, colour = "grey80"),
+    panel.grid.minor.y = element_line(linetype = "dotted", size = 0.1, colour = "grey80"),  
+    plot.caption = element_text(hjust = 0.0, color = "darkgrey", size = 7),  
+    plot.margin = margin(t = 10, b = 15)  
+  ) +  
+
+  # Date range and x-axis customization
+  scale_x_date(limits = c(pennsylvania_dates$min_date, pennsylvania_dates$max_date),  
+               date_breaks = "1 week", date_labels = "%b %d", expand = c(0.01, 0.6)) +
+    # Add a vertical dotted line on September 10
+  geom_vline(xintercept = as.Date("2024-08-06"), linetype = "solid", color = "darkgrey", alpha = 0.3,size = 0.2) +
+  
+  # Annotate the line with "Harris-Walz Debate"
+  annotate("text", x = as.Date("2024-08-06"), y = Inf, label = "Walz Selected as VP", 
+           angle = 90, vjust = -0.5, hjust = 1, color = "#656565", size = 1.75) +
+  
+    # Add a vertical dotted line on September 10
+  geom_vline(xintercept = as.Date("2024-08-19"),linetype = "solid", color = "darkgrey", alpha = 0.3,size = 0.2) +
+  
+  # Annotate the line with "Harris-Walz Debate"
+  annotate("text", x = as.Date("2024-08-19"), y = Inf, label = "Democratic Convention", 
+           angle = 90, vjust = -0.5, hjust = 1, color = "#656565", size = 1.75) +
+    
+  # Add a vertical dotted line on September 10
+  geom_vline(xintercept = as.Date("2024-09-10"), linetype = "solid", color = "darkgrey", alpha = 0.3,size = 0.2) +
+  
+  # Annotate the line with "Harris-Walz Debate"
+  annotate("text", x = as.Date("2024-09-10"), y = Inf, label = "Harris-Trump Debate", 
+           angle = 90, vjust = -0.5, hjust = 1, color = "#656565", size = 1.75) +
+  
+   # Add a vertical dotted line on September 10
+  geom_vline(xintercept = as.Date("2024-10-10"),linetype = "solid", color = "darkgrey", alpha = 0.3,size = 0.2) +
+  
+  # Annotate the line with "Harris-Walz Debate"
+  annotate("text", x = as.Date("2024-10-10"), y = Inf, label = "Vance-Walz Debate", 
+           angle = 90, vjust = -0.5, hjust = 1, color = "#656565", size = 1.75) +
+  
+     # Add a vertical dotted line on September 10
+geom_vline(xintercept = as.Date("2024-10-27"), linetype = "solid", color = "darkgrey", alpha = 0.3,size = 0.2) +  # Adjust size for thinness 
+  
+  # Annotate the line with "Harris-Walz Debate"
+  annotate("text", x = as.Date("2024-10-27"), y = Inf, label = "Madison Square Garden Rally", 
+           angle = 90, vjust = -0.5, hjust = 1, color = "#656565", size = 1.75) +
+
+  # Linetype customization for each state
+  scale_linetype_manual(values = c("Pennsylvania" = 1, "Michigan" = 3, "Wisconsin" = 3, "Arizona" = 3,  
+                                   "North Carolina" = 3, "Georgia" = 3, "Nevada" = 3,  
+                                   "Texas" = 3, "New Mexico" = 3, "Florida" = 3, "Minnesota" = 3))
+```
+
+```{r, warning=FALSE, message=FALSE}
+ggdraw(graph) + 
+  draw_image(image_read("https://raw.githubusercontent.com/markgsheppard/OnlineResources/refs/heads/main/legend.png"), x = 0.8, y = 0.8, width = 0.15, height = 0.15)
+```

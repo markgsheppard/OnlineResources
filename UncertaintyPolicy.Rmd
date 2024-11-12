@@ -1,0 +1,136 @@
+---
+author: "2Lt., Mark G. Sheppard, M.A., M.P.P., Ph.D. (2025)""
+---
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+# Packages
+library(tidyverse)      # For data manipulation and ggplot2 (includes dplyr, ggplot2, and more)
+library(readxl)         # For reading Excel files
+library(httr)           # For downloading files from the web
+library(lubridate)      # For date manipulation
+library(ggplot2)        # For data visualization
+library(strucchange)    # For structural break analysis
+library(fredr)          # For accessing FRED economic data
+library(cowplot)        # For combining plots and adding images (ggdraw, draw_image)
+library(magick)         # For image reading and manipulation (image_read)
+
+# Set FRED API key
+fredr_set_key("6352ad3b393d3ab83709630e61d2b14e")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+# Load data
+df <- {tempfile_path <- tempfile(fileext = ".xlsx"); GET("https://www.policyuncertainty.com/media/US_Policy_Uncertainty_Data.xlsx", write_disk(tempfile_path, overwrite = TRUE)); read_xlsx(tempfile_path) %>% mutate(Date = make_date(Year, Month, 1)) %>% select(Date, Three_Component_Index, Policy_Uncertainty_Index = News_Based_Policy_Uncert_Index) %>% na.omit()}
+# Clean
+setwd("~/Desktop") # For Mac
+rm(list = setdiff(ls(), "df"))
+cat("\014")     # Clear console
+
+# Check Structural Breaks
+break_dates <- df$Date[breakpoints(ts(df$Policy_Uncertainty_Index, start = c(year(min(df$Date)), month(min(df$Date))), frequency = 12) ~ 1)$breakpoints]
+
+# Fetch both series, merge them, and calculate the average
+consumer_sentiment <- fredr(series_id = "UMCSENT", observation_start = as.Date("1985-01-01"), observation_end = as.Date("2024-10-01")) %>%
+  select(date, UMCSENT = value) %>%
+  left_join(
+    fredr(series_id = "CSCICP03USM665S", observation_start = as.Date("1985-01-01"), observation_end = as.Date("2024-10-01")) %>%
+      select(date, CONCCONF = value),
+    by = "date"
+  ) %>%
+  mutate(Average_Consumer_Sentiment = (UMCSENT * 0.5 + CONCCONF * 0.5))
+
+# Merge consumer sentiment data into df by date
+df <- df %>%
+  left_join(consumer_sentiment, by = c("Date" = "date"))
+
+# Fit the linear model to get slope and intercept for the trend line
+lm_model <- lm(Policy_Uncertainty_Index ~ as.numeric(Date), data = df)
+slope <- coef(lm_model)[2]
+intercept <- coef(lm_model)[1]
+```
+
+Method: method = "loess"
+
+LOESS (Locally Estimated Scatterplot Smoothing) is a non-parametric regression technique. It fits multiple regressions over localized subsets of data, which allows the line to follow the data's shape closely without assuming a strict linear relationship.
+LOESS is particularly useful for datasets with non-linear relationships, as it captures fluctuations and trends more flexibly than simple linear regression.
+
+Smoothing Span: span = 0.4
+
+The span parameter controls how much of the data is used to fit each localized regression in the LOESS smoothing.
+A smaller span (like 0.4) means the model will focus on smaller portions of data at each step, resulting in a line that is more responsive to small fluctuations in the data.
+Increasing the span would create a smoother, less responsive line that averages over larger portions of data.
+
+
+```{r, warning=FALSE, message=FALSE}
+equation_text <- paste0("y = ", round(intercept, 0), " + ", round(slope, 4), "x")
+# Define the plot
+graph <- ggplot(df, aes(x = Date, y = Policy_Uncertainty_Index)) +
+  geom_hline(yintercept = 125, linetype = "solid", color = "grey10", size = 0.3, alpha = 0.2) +
+  annotate("text", x = min(df$Date) + 200, y = 130, label = "Average Uncertainty", color = "grey30", size = 2, hjust = 0) +
+  
+  # Scatter plot for actual data with rescaled bubble size relative to consumer sentiment
+  geom_point(aes(size = Average_Consumer_Sentiment^10), color = "#5d90ba", alpha = 0.1, shape = 16) +
+  scale_size_continuous(range = c(1, 5)) +  # Rescale bubble size to a range between 1 and 5
+  
+  # Add a "ball" at the end of the line
+  geom_point(data = df %>% filter(Date == max(Date)), 
+             aes(x = Date, y = 120), 
+             color = "#085fa8", size = 2) +
+  
+  # Smooth line with higher resolution for finer smoothness
+  geom_smooth(method = "loess", se = TRUE, span = 0.15, level = 0.95, color = "#085fa8", fill = "#5d90ba", alpha = 0.3, n = 10000) +
+  
+  # Regression trendline
+  geom_smooth(method = "lm", color = "#085fa8", linetype = "dotted", size = 0.5, se = FALSE) +
+  
+  # Add regression line equation
+  annotate("text", x = as.Date("1994-06-01") + 400, y = 106, label = equation_text, color = "#085fa8", size = 1.85, angle = 8, hjust = 0) +
+  
+  # Annotations for key dates with vertical lines and labels
+  geom_vline(xintercept = as.Date("2016-11-03"), linetype = "dotted", color = "darkgrey", size = 0.3) +
+  annotate("text", x = as.Date("2016-11-03"), y = 205,  # Lowered y position
+           label = "Election of Donald J. Trump", vjust = -0.5, hjust = 1, color = "grey30", size = 2, angle = 90) +
+  
+  # Titles and labels
+  labs(
+    title = "The Uncertain Economy",
+    subtitle = "Trends in Economic Policy Uncertainty, represented as LOESS with 95% CI \nScaled by Consumer Sentiment, Elections Highlighted for Reference\nData from 1984 to Present",
+    x = NULL,  # Remove x-axis title
+    y = "Policy Uncertainty Index",
+    caption = "\nSource: Economic Policy Uncertainty Index, University of Michigan, The Conference Board \nNote: Line shows Locally Estimated Scatterplot Smoothing (LOESS) which is a non-parametric regression technique with smoothing span of 0.15. \nWhich fits multiple regressions over localized subsets of data, allowing the line to follow the data closely without assuming a strict linear relationship.\nConsumer sentiment was averaged using an equal weighting of the University of Michigan Consumer Sentiment Index and the Conference Board Consumer Confidence Index. \nAuthor: Mark G. Sheppard"
+  ) +
+  
+  # Minimal theme for cleaner appearance
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, color = "#454545", margin = margin(b = 5)),  # Reduce bottom margin of title
+    plot.subtitle = element_text(size = 7, color = "darkgrey", margin = margin(t = -5)),  # Move subtitle closer to title
+    
+    # Customize x-axis text
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 6),  # Shrink x-axis text
+    
+    # Customize y-axis text and title
+    axis.text.y = element_text(size = 6, color = "grey30"),  # Darker y-axis text
+    axis.title.y = element_text(size = 8, face = "bold", color = "black"),  # Darker y-axis title
+    
+    # Customize caption with additional details
+    plot.caption = element_text(hjust = 0, size = 6, color = "grey50"),  # Left-align, shrink, and make caption grey
+    
+    # Remove legend and adjust grid lines
+    legend.position = "none",
+    panel.grid.major.y = element_line(linetype = "dotted", color = "grey95"),  # Make horizontal lines more transparent
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  
+  # Custom x-axis scale and y-axis limits with data range
+  scale_x_date(limits = range(df$Date), date_labels = "%Y", date_breaks = "12 months") +
+  scale_y_continuous(limits = c(50, 210), breaks = seq(50, 210, by = 25))  # Set y-axis breaks every 50 and limits
+
+# Overlay both external legend images
+ggdraw(graph) + 
+  draw_image(image_read("https://raw.githubusercontent.com/markgsheppard/OnlineResources/refs/heads/main/UnceraintyLegend.jpg"), 
+             x = 0.7, y = 0.84, width = 0.28, height = 0.15) +
+  draw_image(image_read("https://raw.githubusercontent.com/markgsheppard/OnlineResources/refs/heads/main/UnceraintyLegendBall.png"), 
+             x = 0.88, y = 0.425, width = 0.15, height = 0.15)  # Position on the far right
+```

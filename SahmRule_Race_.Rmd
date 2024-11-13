@@ -1,0 +1,137 @@
+---
+title: "Disaggregating the Sahm Rule"
+author: "2Lt., Mark G. Sheppard, M.A., M.P.P., Ph.D. (2025)""
+---
+
+```{r}
+# Load necessary libraries
+library(ggplot2)      # For plotting and customization
+library(cowplot)      # For combining ggplot with images
+library(magick)       # For handling images with cowplot
+library(dplyr)        # For data manipulation
+library(tidyr)        # For data reshaping
+library(zoo)          # For rolling averages
+library(fredr)        # For accessing FRED data
+
+# Set your FRED API key
+fredr_set_key("YOUR API KEY")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+# Fetch and process data in a single command
+df <- list(
+  fredr(series_id = "LNS14000006") %>% select(date, black = value),
+  fredr(series_id = "LNU04000003") %>% select(date, white = value),
+  fredr(series_id = "LNS14032183") %>% select(date, asian = value),
+  fredr(series_id = "LNU04000009") %>% select(date, hispanic = value),
+  fredr(series_id = "UNRATE") %>% select(date, unrate = value),
+  fredr(series_id = "SAHMREALTIME") %>% select(date, sahm_rule = value),
+  fredr(series_id = "USREC") %>% select(date, recession = value)  # Fetch recession indicator
+) %>% 
+  reduce(full_join, by = "date") %>% 
+  mutate(
+    # 3-month moving averages
+    across(black:hispanic, ~ rollmean(.x, 3, fill = NA, align = "right"), .names = "{.col}_3mo_avg"),
+    unrate_3mo_avg = rollmean(unrate, 3, fill = NA, align = "right"),
+    
+    # 12-month minimum of 3-month UNRATE average
+    unrate_min_12mo = rollapply(unrate_3mo_avg, 12, min, fill = NA, align = "right"),
+    
+    # Sahm Rule differences
+    across(black_3mo_avg:hispanic_3mo_avg, ~ .x - unrate_min_12mo, .names = "{.col}_sahm")
+  ) %>% 
+  select(date, sahm_rule, recession, ends_with("_sahm")) %>% 
+  rename(sahm = sahm_rule, black = black_3mo_avg_sahm, white = white_3mo_avg_sahm,
+         asian = asian_3mo_avg_sahm, hispanic = hispanic_3mo_avg_sahm) %>%
+  
+  # Convert to long format for plotting
+  pivot_longer(cols = -c(date, sahm, recession), names_to = "category", values_to = "value")
+
+# Clear other objects in environment except 'sahm_'
+rm(list = setdiff(ls(), "df")); cat("\014")
+
+# Define the color palette for racial categories
+blue_palette <- scale_color_manual(values = c(
+  "white" = "#c3e6f7",
+  "asian" = "#9ecae1",
+  "hispanic" = "#3182bd",
+  "black" = "#08519c"
+))
+
+# Filter only relevant recession periods (from 1975 onward)
+recession_periods <- df %>%
+  filter(date >= as.Date("1975-01-01")) %>%
+  mutate(
+    recession_start = (recession == 1 & lag(recession, default = 0) == 0),
+    recession_end = (recession == 0 & lag(recession, default = 1) == 1)
+  ) %>%
+  filter(recession_start | recession_end) %>%
+  mutate(period = cumsum(recession_start)) %>%
+  group_by(period) %>%
+  summarize(start = min(date), end = max(date)) %>%
+  ungroup()
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results='hide'}
+# Create the plot with recession shading and customized elements
+graph <- ggplot(df, aes(x = date, y = value, color = category)) +
+  
+  # Add recession shading as light grey rectangles for each period
+  geom_rect(data = recession_periods, aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "grey90", alpha = 0.3, inherit.aes = FALSE) +
+  
+  # Add the Sahm Rule horizontal reference line first to appear behind other elements
+  geom_hline(yintercept = 0.5, linetype = "solid", color = "grey80", size = 0.3) +
+  
+  # Plot the racial recession lines
+  geom_line(size = 0.5) +
+  blue_palette +
+  
+  # Labels and annotations
+  labs(
+    title = "Racial Recessions",
+    subtitle = "The Sahm Recession Indicator, Disaggregated by Race \nShown with Reference Lines and Recessions \nData from 1975 to Present.",
+    y = "Recession Indicator",
+    color = NULL,  # Remove legend title
+    caption = "\nSource: Claudia Sahm, Bureau of Labor Statistics (BLS) \nNote: Indicator based on real-time unemployment rate data, adjusted annually for seasonal factors. \nThe Sahm Recession Indicator signals a recession when the unemployment rate's three-month moving average\nrises by 0.50 percentage points or more relative to the previous 12 months' minimum average.\nAuthor: Mark G. Sheppard"
+  ) +
+  
+  # Recession and Non-Recession indicators
+  annotate("text", x = as.Date("1975-01-01"), y = 1, label = "↑ Recession", color = "grey20", hjust = 0, size = 2.4) +
+  annotate("text", x = as.Date("1975-01-01"), y = 0, label = "↓ Non-Recession", color = "grey20", hjust = 0, size = 2.3) +
+  
+  # Note in the middle of the graph
+  annotate("text", x = as.Date("1993-01-01"), y = 8.8, 
+           label = "By traditional metrics \nthe Black and Hispanic \ncommunity exist in \nperpetual recession", 
+           color = "grey60", hjust = 0, size = 2.2, lineheight = 0.9, fontface = "bold") +
+  
+  # Theme customization
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0, vjust = 1, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 7, color = "darkgrey", hjust = 0, margin = margin(t = -5)),
+    plot.caption = element_text(size = 6.5, color = "darkgrey", hjust = 0),
+    axis.title.y = element_text(size = 8, color = "grey60", margin = margin(r = 10)),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 8, color = "grey40"),
+    axis.text.y = element_text(size = 8, color = "grey40"),
+    panel.grid.major.y = element_line(linetype = "dotted", color = "grey90", linewidth = 0.5),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",  # Remove legend
+    plot.margin = margin(t = 4, r = 3, b = 4, l = 3)
+  ) +
+  
+  # Scale adjustments
+  scale_x_date(limits = as.Date(c("1975-01-01", "2024-01-01")), date_breaks = "5 years", date_labels = "%Y") +
+  scale_y_continuous(breaks = seq(-10, 12.5, by = 2.5))
+
+# Add external legend image
+graph <- ggdraw(graph) + 
+  draw_image(image_read("https://raw.githubusercontent.com/markgsheppard/OnlineResources/refs/heads/main/SahmRule-RacialLegend.png"), 
+             x = 0.62, y = 0.82, width = 0.36, height = 0.15)
+
+# Display the graph
+print(graph)
+```
+

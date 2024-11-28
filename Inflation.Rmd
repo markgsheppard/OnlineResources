@@ -1,0 +1,310 @@
+---
+title: "Inflation"
+author: "2Lt., Mark G. Sheppard, M.A., M.P.P., Ph.D. (2025)""
+---
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+# Clear console and environment, set working directory as Desktop
+rm(list = ls());setwd(file.path(Sys.getenv("HOME"), "Desktop"))
+# Load necessary libraries
+if(!require(fredr)){install.packages("fredr", dependencies = TRUE); library(fredr, quietly = TRUE)}
+if(!require(ggplot2)){install.packages("ggplot2", dependencies = TRUE); library(ggplot2, quietly = TRUE)}
+if(!require(dplyr)){install.packages("dplyr", dependencies = TRUE); library(dplyr, quietly = TRUE)}
+if(!require(zoo)){install.packages("zoo", dependencies = TRUE); library(zoo, quietly = TRUE)}
+if(!require(KFAS)){install.packages("KFAS", dependencies = TRUE); library(KFAS, quietly = TRUE)}
+if(!require(tidyr)){install.packages("tidyr", dependencies = TRUE); library(tidyr, quietly = TRUE)}
+if(!require(purrr)){install.packages("purrr", dependencies = TRUE); library(purrr, quietly = TRUE)}
+if (!require(cowplot)) install.packages("cowplot", dependencies = TRUE); library(cowplot)
+if (!require(magick)) install.packages("magick", dependencies = TRUE);library(magick)
+if (!require(lubridate)) install.packages("lubridate", dependencies = TRUE); library(lubridate)
+fredr_set_key("6352ad3b393d3ab83709630e61d2b14e"); cat("\014") # Set your FRED API key
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide', comment=FALSE}
+# Define the observation end date dynamically as today's date
+observation_end_date <- Sys.Date()
+
+# Fetch and process all data in a single pipeline
+df <- list(
+  # Core PCE
+  fredr(series_id = "PCEPILFE", observation_start = as.Date("2010-01-01"), observation_end = observation_end_date) %>%
+    rename(core_pce = value) %>%
+    select(date, core_pce),
+  
+  # Headline PCE
+  fredr(series_id = "PCEPI", observation_start = as.Date("2010-01-01"), observation_end = observation_end_date) %>%
+    rename(headline_pce = value) %>%
+    select(date, headline_pce),
+  
+  # Recession indicator
+  fredr(series_id = "USREC", observation_start = as.Date("2010-01-01"), observation_end = observation_end_date) %>%
+    rename(recession = value) %>%
+    select(date, recession)
+) %>%
+  # Combine all data
+  reduce(full_join, by = "date") %>%
+  arrange(date) %>%
+  mutate(
+    # Calculate 3-month moving averages
+    core_pce_3mo_avg = rollmean(core_pce, k = 3, fill = NA, align = "right"),
+    headline_pce_3mo_avg = rollmean(headline_pce, k = 3, fill = NA, align = "right"),
+    
+    # Calculate 6-month moving averages
+    core_pce_6mo_avg = rollmean(core_pce, k = 6, fill = NA, align = "right"),
+    headline_pce_6mo_avg = rollmean(headline_pce, k = 6, fill = NA, align = "right"),
+    
+    # Calculate year-over-year changes
+    core_pce_yoy = (core_pce / lag(core_pce, 12) - 1) * 100,
+    headline_pce_yoy = (headline_pce / lag(headline_pce, 12) - 1) * 100,
+    
+    # Kalman filters for smoothing
+    core_pce_kalman = {
+      ss_model <- SSModel(core_pce ~ SSMtrend(1, Q = NA), H = NA)
+      fit <- fitSSM(ss_model, inits = c(0.1, 0.1), method = "BFGS")
+      KFS(fit$model)$a[1:length(core_pce)]
+    },
+    headline_pce_kalman = {
+      ss_model <- SSModel(headline_pce ~ SSMtrend(1, Q = NA), H = NA)
+      fit <- fitSSM(ss_model, inits = c(0.1, 0.1), method = "BFGS")
+      KFS(fit$model)$a[1:length(headline_pce)]
+    }
+  )
+
+# Define recession periods manually (example data)
+recession_periods <- data.frame(
+  start = as.Date(c("2008-01-01", "2020-02-01")),
+  end = as.Date(c("2009-06-01", "2020-04-01"))
+)
+
+# Ensure df_long is correctly formatted
+df <- df %>%
+  pivot_longer(cols = -c(date, recession), names_to = "category", values_to = "value")
+
+# Clear the console
+cat("\014")
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results='hide', comment=FALSE}
+# Filter out problematic data points
+df_filtered <- df %>%
+  filter(!(category %in% c("core_pce_kalman", "headline_pce_kalman") & date == as.Date("2010-01-01") & value == 0)) %>%
+  filter(!category %in% c("core_pce_yoy", "headline_pce_yoy"))  # Exclude YoY data
+
+# Define blue shades for the color palette
+blue_palette <- c(
+  "core_pce" = "#c3e6f7",
+  "headline_pce" = "#9ecae1",
+  "core_pce_3mo_avg" = "#6baed6",
+  "headline_pce_3mo_avg" = "#4292c6",
+  "core_pce_6mo_avg" = "#2171b5",
+  "headline_pce_6mo_avg" = "#084594",
+  "core_pce_kalman" = "#6faed1",
+  "headline_pce_kalman" = "#2171b5"
+)
+
+# Create the plot with recession shading and customized elements
+graph <- ggplot(df_filtered, aes(x = date, y = value, color = category)) +
+  
+  # Add recession shading as light grey rectangles for each period
+  geom_rect(data = recession_periods, aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "grey90", alpha = 0.7, inherit.aes = FALSE) +
+  
+  # Plot all lines
+  geom_line(size = 0.5) +
+  
+  # Customize color palette
+  scale_color_manual(values = blue_palette) +
+  
+  # Labels and annotations
+  labs(
+    title = "Inflation Indicators",
+    subtitle = "Core and Headline Inflation Measure \nIncluding Moving Averages and Kalman Filter Outputs\nData from 2010 to Present",
+    y = "Value",
+    color = "Indicator", # This title will not show as the legend is removed
+    caption = "\nSource: U.S. Bureau of Economic Analysis (BEA), Federal Reserve Bank of St. Louis\nVisualization by Mark G. Sheppard"
+  ) +
+  
+  # Theme customization
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0, vjust = 1, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 7, color = "darkgrey", hjust = 0, margin = margin(t = -5)),
+    plot.caption = element_text(size = 6.5, color = "darkgrey", hjust = 0),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 8, color = "grey40"),
+    axis.text.y = element_text(size = 8, color = "grey40"),
+    panel.grid.major.y = element_line(linetype = "dotted", color = "grey90", linewidth = 0.5),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none", # Remove the internal legend
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 10)
+  ) +
+  
+  # Scale adjustments
+  scale_x_date(limits = as.Date(c("2010-01-01", "2024-10-01")), date_breaks = "2 years", date_labels = "%Y")
+
+# Add external legend image
+graph <- ggdraw(graph) + 
+  draw_image(image_read("https://raw.githubusercontent.com/markgsheppard/OnlineResources/refs/heads/main/InflationLegend_.jpg"), 
+             x = 0.63, y = 0.86, width = 0.35, height = 0.12)
+
+# Display the graph with external legend
+print(graph)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide', comment=FALSE}
+# Define the observation end date dynamically as today's date
+observation_end_date <- Sys.Date()
+
+# Fetch and process all data in a single pipeline
+df <- list(
+  # Core PCE
+  fredr(series_id = "PCEPILFE", 
+        observation_start = as.Date("2010-01-01"), 
+        observation_end = observation_end_date,
+        units = "pch") %>%  # Percent change
+    rename(core_pce = value) %>%
+    select(date, core_pce),
+  
+  # Headline PCE
+  fredr(series_id = "PCEPI", 
+        observation_start = as.Date("2010-01-01"), 
+        observation_end = observation_end_date,
+        units = "pch") %>%  # Percent change
+    rename(headline_pce = value) %>%
+    select(date, headline_pce),
+  
+  # Recession indicator
+  fredr(series_id = "USREC", 
+        observation_start = as.Date("2010-01-01"), 
+        observation_end = observation_end_date) %>% 
+    rename(recession = value) %>%
+    select(date, recession)
+) %>%
+  # Combine all data
+  reduce(full_join, by = "date") %>%
+  arrange(date) %>%
+  mutate(
+    # Calculate 3-month moving averages
+    core_pce_3mo_avg = rollmean(core_pce, k = 3, fill = NA, align = "right"),
+    headline_pce_3mo_avg = rollmean(headline_pce, k = 3, fill = NA, align = "right"),
+    
+    # Calculate 6-month moving averages
+    core_pce_6mo_avg = rollmean(core_pce, k = 6, fill = NA, align = "right"),
+    headline_pce_6mo_avg = rollmean(headline_pce, k = 6, fill = NA, align = "right"),
+    
+    # Calculate year-over-year changes
+    core_pce_yoy = (core_pce / lag(core_pce, 12) - 1) * 100,
+    headline_pce_yoy = (headline_pce / lag(headline_pce, 12) - 1) * 100,
+    
+    # Kalman filters for smoothing
+    core_pce_kalman = {
+      ss_model <- SSModel(core_pce ~ SSMtrend(1, Q = NA), H = NA)
+      fit <- fitSSM(ss_model, inits = c(0.1, 0.1), method = "BFGS")
+      KFS(fit$model)$a[1:length(core_pce)]
+    },
+    headline_pce_kalman = {
+      ss_model <- SSModel(headline_pce ~ SSMtrend(1, Q = NA), H = NA)
+      fit <- fitSSM(ss_model, inits = c(0.1, 0.1), method = "BFGS")
+      KFS(fit$model)$a[1:length(headline_pce)]
+    }
+  )
+
+# Define recession periods with the end date dynamically set to the first day of the current month
+recession_periods <- data.frame(
+  start = as.Date(c("2008-01-01", "2020-02-01")),
+  end = as.Date(c("2009-06-01", "2020-04-01")))
+
+# Ensure df_long is correctly formatted
+df <- df %>%
+  pivot_longer(cols = -c(date, recession), names_to = "category", values_to = "value")
+
+# Clear the console
+cat("\014")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results='hide', comment=FALSE}
+# Filter the data
+df_filtered <- df %>%
+  # Remove rows with Inf or NA values in the value column
+  filter(!is.na(value) & value != Inf) %>%
+  # Remove specific categories
+  filter(!category %in% c("core_pce_yoy", "headline_pce_yoy"))
+
+# Define blue shades for the color palette
+blue_palette <- c(
+  "core_pce" = "#c3e6f7",
+  "headline_pce" = "#9ecae1",
+  "core_pce_3mo_avg" = "#6baed6",
+  "headline_pce_3mo_avg" = "#4292c6",
+  "core_pce_6mo_avg" = "#2171b5",
+  "headline_pce_6mo_avg" = "#084594",
+  "core_pce_kalman" = "#6faed1",
+  "headline_pce_kalman" = "#2171b5"
+)
+
+# Create the plot with recession shading and customized elements
+graph <- ggplot(df_filtered, aes(x = date, y = value, color = category)) +
+  
+  # Add recession shading as light grey rectangles for each period
+  geom_rect(data = recession_periods, aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "grey90", alpha = 0.7, inherit.aes = FALSE) +
+ 
+  # Add a horizontal line for the Federal Reserve Inflation Target
+  geom_hline(yintercept = 0.2, linetype = "solid", color = "grey70", size = 0.3, alpha=0.7) +
+  
+  # Add annotation for the Federal Reserve Inflation Target
+  annotate("text", x = as.Date("2021-03-01"), y = 0.17, label = "Federal Reserve Inflation Target", 
+           color = "grey50", size = 2.2, hjust = 0) +
+   
+  # Plot all lines
+  geom_line(size = 0.5) +
+  
+
+  # Customize color palette
+  scale_color_manual(values = blue_palette) +
+  
+  # Labels and annotations
+  labs(
+    title = "Inflation Indicators",
+    subtitle = "Core and Headline Inflation Measure, in Percent Change \nIncluding Moving Averages and Kalman Filter Outputs\nData from 2010 to Present",
+    y = "Value",
+    color = "Indicator",
+    caption = "\nSource: U.S. Bureau of Economic Analysis (BEA), Federal Reserve Bank of St. Louis\nNote: Author's calculations. Visualized with Inflation target.\nVisualization by Mark G. Sheppard"
+  ) +
+  
+  # Theme customization
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0, vjust = 1, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 7, color = "darkgrey", hjust = 0, margin = margin(t = -5)),
+    plot.caption = element_text(size = 6.5, color = "darkgrey", hjust = 0),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 8, color = "grey40"),
+    axis.text.y = element_text(size = 8, color = "grey40"),
+    panel.grid.major.y = element_line(linetype = "dotted", color = "grey90", linewidth = 0.5),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none", # Remove the internal legend
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 10)
+  ) +
+  
+  # Scale adjustments
+  scale_x_date(limits = as.Date(c("2019-01-01", Sys.Date())), date_breaks = "2 years", date_labels = "%Y")
+
+# Add external legend image
+graph <- ggdraw(graph) + 
+  draw_image(image_read("https://raw.githubusercontent.com/markgsheppard/OnlineResources/refs/heads/main/InflationLegend_.jpg"), 
+             x = 0.62, y = 0.84, width = 0.35, height = 0.12)
+
+# Display the graph with external legend
+print(graph)
+```
+
+
+
+
+
